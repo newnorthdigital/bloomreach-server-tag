@@ -9,7 +9,9 @@
 - Sends page views (all Bloomreach page types, including conversion with basket), virtual page views, add to cart, search submit, suggest click and quick view events to `https://p.brsrvr.com/pix.gif`.
 - Adds the parameters Bloomreach requires for server-side pixels: `version` (prefixed `ss-`), `cookie2`, `client_ip`, `client_ts` in microseconds, `rand`, `url`, `ref`, `type` and the visitor's `user-agent` header.
 - Manages the `_br_uid_2` visitor cookie server-side: reuses the existing cookie so current visitors keep their history, creates one for new visitors, and increases the hit count on every hit. Because the cookie is set by your server, Safari's 7-day cap on script-set cookies does not apply.
-- Defaults every field to GA4 event data: `page_location`, `page_referrer`, `page_title`, `language`, `items`, `transaction_id`, `value`, `currency`, `search_term`. Every field can be overridden.
+- Reads `br_<parameter>` event parameters when a field is empty: `br_ptype`, `br_prod_id`, `br_prod_name`, `br_sku`, `br_cat_id`, `br_cat`, `br_search_term`, `br_item_id`, `br_item_name`, `br_catalogs`, `br_title`, `br_user_id`, `br_q` and `br_aq`. No Event Data variables needed.
+- Page types are trimmed and lowercased. Values Bloomreach does not accept are sent as `other` and logged as an error. In GTM Preview, `debug=true` is added automatically.
+- Otherwise, defaults every field to GA4 event data: `page_location`, `page_referrer`, `page_title`, `language`, `items`, `transaction_id`, `value`, `currency`, `search_term`. Every field can be overridden.
 - Skips hits where GA4 reports `analytics_storage` as denied (`gcs`), and skips user agents on Bloomreach's blocklist (curl, wget, python-requests, bots, crawlers and similar).
 - Errors are always logged, also in production. Per-hit logging is optional.
 
@@ -40,10 +42,10 @@ There is also a [web version](https://github.com/newnorthdigital/bloomreach-web-
 
 ## Setup guide
 
-1. **Page view tag.** Pixel type **Page view**, your **Account ID**, and **Page type** set to a variable. A GA4 `page_view` carries no product or category data, so send what Bloomreach needs as `page_view` event parameters from the browser (for example `br_ptype`, `br_prod_id`, `br_prod_name`, `br_cat_id`, `br_cat`) and map them into the fields with Event Data variables. Trigger: GA4 `page_view`, excluding the order confirmation page.
+1. **Page view tag.** Pixel type **Page view**, your **Account ID**, and **Page type** on **Automatic**. A GA4 `page_view` carries no product or category data, so send what Bloomreach needs as `page_view` event parameters from the browser, named after the Bloomreach parameter with a `br_` prefix: `br_ptype`, `br_prod_id`, `br_prod_name`, `br_sku`, `br_cat_id`, `br_cat`, `br_search_term`, `br_item_id`, `br_item_name`, `br_catalogs`. The tag reads them without any Event Data variables. With a fixed page type instead of Automatic, the fields for that page type appear, and a value there wins over the event parameter. Trigger: GA4 `page_view`, excluding the order confirmation page.
 2. **Conversion.** A second Page view tag with page type `conversion`, triggered on the GA4 `purchase` event. Order ID, value, currency and basket come from the purchase event. Exclude the confirmation page from the tag in step 1, or Bloomreach receives two page views for it.
 3. **Events.** One tag per event type: **Add to cart** on `add_to_cart`, **Search submit** on `search`, **Suggest click** and **Quick view** on your own events.
-4. **Validate.** Tick **Send as debug events**, then check Event diagnostics in Integration mode. Bloomreach discards events with problems in `version`, `client_ip`, `client_ts` or `user-agent`.
+4. **Validate.** In GTM Preview the tag sends debug events on its own; check Event diagnostics in Integration mode. Tick **Send as debug events** only to test outside Preview. Bloomreach discards events with problems in `version`, `client_ip`, `client_ts` or `user-agent`.
 
 ## Field reference
 
@@ -51,7 +53,7 @@ There is also a [web version](https://github.com/newnorthdigital/bloomreach-web-
 |---|---|---|
 | Account ID | `acct_id` | Required. |
 | Domain key, view ID, user ID | `domain_key`, `view_id`, `user_id` | Only when your account needs them. |
-| Page type | `ptype` | Accepts a variable. |
+| Page type | `ptype` | Automatic: `br_ptype`, else `other`. Accepts a variable. |
 | Page title | `title` | `page_title` |
 | Product ID / name / SKU | `prod_id`, `prod_name`, `sku` | First item in `items` |
 | Category ID / name | `cat_id`, `cat` | |
@@ -72,6 +74,7 @@ There is also a [web version](https://github.com/newnorthdigital/bloomreach-web-
 
 - Reads event data and request headers (user agent, client IP).
 - Reads and sets the `_br_uid_2` cookie.
+- Reads container data (to detect GTM Preview).
 - Sends HTTP requests to `https://p.brsrvr.com/*`.
 - Logs to the console in all environments (errors always, per-hit logs only when enabled).
 

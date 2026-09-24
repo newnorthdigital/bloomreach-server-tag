@@ -71,10 +71,17 @@ ___TEMPLATE_PARAMETERS___
     "name": "accountId",
     "displayName": "Account ID",
     "simpleValueType": true,
-    "help": "Your Bloomreach Discovery account ID (acct_id), e.g. 6702.",
+    "help": "Your Bloomreach Discovery account ID (acct_id), numeric, e.g. 6702.",
     "valueValidators": [
       {
         "type": "NON_EMPTY"
+      },
+      {
+        "type": "REGEX",
+        "args": [
+          "^\\s*([0-9]+|\\{\\{.+\\}\\})\\s*$"
+        ],
+        "errorMessage": "The account ID is a number, e.g. 6702."
       }
     ],
     "alwaysInSummary": true
@@ -113,6 +120,10 @@ ___TEMPLATE_PARAMETERS___
         "macrosInSelect": true,
         "selectItems": [
           {
+            "value": "auto",
+            "displayValue": "Automatic (br_ptype event parameter, else other)"
+          },
+          {
             "value": "homepage",
             "displayValue": "homepage"
           },
@@ -146,8 +157,8 @@ ___TEMPLATE_PARAMETERS___
           }
         ],
         "simpleValueType": true,
-        "defaultValue": "other",
-        "help": "Bloomreach page type. Use a variable (lookup table on page path or a dataLayer key) so one tag covers every page type."
+        "defaultValue": "auto",
+        "help": "Bloomreach page type. Use a variable (lookup table on page path or a dataLayer key) so one tag covers every page type. Values Bloomreach does not accept are sent as other. Automatic reads the br_ptype parameter of the GA4 event."
       },
       {
         "type": "TEXT",
@@ -323,6 +334,11 @@ ___TEMPLATE_PARAMETERS___
             "type": "EQUALS"
           }
         ]
+      },
+      {
+        "type": "LABEL",
+        "name": "brParamsNote",
+        "displayName": "Fields left empty (or hidden) read br_<parameter> from the GA4 event: br_ptype, br_prod_id, br_prod_name, br_sku, br_cat_id, br_cat, br_search_term, br_item_id, br_item_name, br_catalogs, br_title, br_user_id, br_q, br_aq."
       }
     ],
     "enablingConditions": [
@@ -544,7 +560,7 @@ ___TEMPLATE_PARAMETERS___
         "checkboxText": "Send as debug events (Integration mode)",
         "simpleValueType": true,
         "defaultValue": false,
-        "help": "Adds debug=true. Events show up within seconds in Event diagnostics, Integration mode, and do not affect live search or reporting."
+        "help": "Adds debug=true on every hit. Events show up within seconds in Event diagnostics, Integration mode, and do not affect live search or reporting. In GTM Preview this happens automatically."
       },
       {
         "type": "CHECKBOX",
@@ -621,6 +637,7 @@ const makeTableMap = require('makeTableMap');
 const getType = require('getType');
 const Object = require('Object');
 const logToConsole = require('logToConsole');
+const getContainerVersion = require('getContainerVersion');
 
 const ENDPOINT = 'https://p.brsrvr.com/pix.gif';
 const COOKIE = '_br_uid_2';
@@ -632,8 +649,13 @@ const VERSION = 'ss-nnd-1.0';
 const UA_BLOCKLIST = ['curl', 'wget', 'python-requests', 'postmanruntime', 'java/', 'node-fetch', 'axios', 'spider', 'crawler',
   'bot/', 'bot;', 'bot)', 'bot-', 'bot+'];
 
+// Page types Bloomreach accepts; anything else is sent as "other".
+const PTYPES = ['homepage', 'product', 'category', 'search', 'content', 'conversion', 'thematic', 'other'];
+const DIGITS = '0123456789';
+const isAccountId = (v) => v.length > 0 && v.split('').every((c) => DIGITS.indexOf(c) !== -1);
+
 const pixelType = data.pixelType || 'pageview';
-const accountId = data.accountId ? makeString(data.accountId) : '';
+const accountId = data.accountId ? makeString(data.accountId).trim() : '';
 
 // Errors always reach production logs; verbose per-event logs only when enabled.
 const logError = (msg) => logToConsole('Bloomreach sGTM - ERROR - ' + msg);
@@ -649,6 +671,11 @@ const firstSet = (a, b) => isSet(a) ? a : b;
 // Read the event once and work from the snapshot.
 const ev = getAllEventData() || {};
 const items = getType(ev.items) === 'array' ? ev.items : [];
+
+// Field value in priority order: the tag field, then a br_<param> event
+// parameter sent from the browser (br_ptype, br_prod_id, br_cat_id, ...),
+// then the GA4 fallback.
+const pick = (field, param, fallback) => firstSet(data[field], firstSet(ev['br_' + param], fallback));
 
 // Map one item (GA4 or Bloomreach shape) to prod_id/sku/name/quantity/price.
 // In GA4 item_id is either the product ID or the SKU; idMapping says which.
@@ -757,8 +784,8 @@ const EVENTS = {
   suggestClick: {group: 'suggest', etype: 'click'}
 };
 
-if (!accountId) {
-  logError('Account ID is required');
+if (!isAccountId(accountId)) {
+  logError('Account ID must be the numeric Bloomreach account ID, got "' + accountId + '"');
   data.gtmOnFailure();
   return;
 }
@@ -803,22 +830,29 @@ const params = {
   client_ip: makeString(firstSet(ev.ip_override, getRemoteAddress())),
   url: pageUrl,
   ref: firstSet(data.referrer, ev.page_referrer),
-  title: firstSet(data.title, ev.page_title),
+  title: pick('title', 'title', ev.page_title),
   lang: ev.language,
   domain_key: data.domainKey,
   view_id: data.viewId,
-  user_id: data.userId
+  user_id: pick('userId', 'user_id')
 };
 if (data.testData) {
   params.test_data = 'true';
 }
-if (data.debugMode) {
+// GTM Preview sends debug events automatically (Integration mode).
+const cv = getContainerVersion();
+if (data.debugMode || (cv && (cv.previewMode || cv.debugMode))) {
   params.debug = 'true';
 }
 
 let basket = '';
 if (PAGE_TYPES.indexOf(pixelType) !== -1) {
-  const ptype = makeString(data.ptype || 'other');
+  // "auto" (the default) reads the br_ptype event parameter.
+  let ptype = makeString(isSet(data.ptype) && data.ptype !== 'auto' ? data.ptype : firstSet(ev.br_ptype, 'other')).trim().toLowerCase();
+  if (PTYPES.indexOf(ptype) === -1) {
+    logError('Page type "' + ptype + '" is not a Bloomreach page type, sending "other"');
+    ptype = 'other';
+  }
   params.type = 'pageview';
   params.ptype = ptype;
   if (pixelType === 'virtualPageview') {
@@ -826,17 +860,17 @@ if (PAGE_TYPES.indexOf(pixelType) !== -1) {
   }
   if (ptype === 'product') {
     const item = mapItem(items[0]);
-    params.prod_id = firstSet(data.prodId, item.prod_id);
-    params.prod_name = firstSet(data.prodName, item.name);
-    params.sku = firstSet(data.sku, item.sku);
+    params.prod_id = pick('prodId', 'prod_id', item.prod_id);
+    params.prod_name = pick('prodName', 'prod_name', item.name);
+    params.sku = pick('sku', 'sku', item.sku);
   } else if (ptype === 'category') {
-    params.cat_id = data.catId;
-    params.cat = data.cat;
+    params.cat_id = pick('catId', 'cat_id');
+    params.cat = pick('cat', 'cat');
   } else if (ptype === 'search') {
-    params.search_term = firstSet(data.searchTerm, ev.search_term);
+    params.search_term = pick('searchTerm', 'search_term', ev.search_term);
   } else if (ptype === 'content') {
-    params.item_id = data.itemId;
-    params.item_name = data.itemName;
+    params.item_id = pick('itemId', 'item_id');
+    params.item_name = pick('itemName', 'item_name');
   } else if (ptype === 'conversion') {
     params.is_conversion = '1';
     params.order_id = firstSet(data.orderId, ev.transaction_id);
@@ -845,7 +879,7 @@ if (PAGE_TYPES.indexOf(pixelType) !== -1) {
     basket = buildBasket();
   }
   if (ptype === 'search' || ptype === 'content') {
-    params.catalogs = buildCatalogs(data.catalogs);
+    params.catalogs = buildCatalogs(pick('catalogs', 'catalogs'));
   }
 } else {
   const evt = EVENTS[pixelType];
@@ -855,19 +889,19 @@ if (PAGE_TYPES.indexOf(pixelType) !== -1) {
   params.etype = evt.etype;
   if (pixelType === 'addToCart' || pixelType === 'quickView') {
     const item = mapItem(items[0]);
-    params.prod_id = firstSet(data.evProdId, item.prod_id);
-    params.sku = firstSet(data.evSku, item.sku);
-    params.prod_name = firstSet(data.evProdName, item.name);
+    params.prod_id = pick('evProdId', 'prod_id', item.prod_id);
+    params.sku = pick('evSku', 'sku', item.sku);
+    params.prod_name = pick('evProdName', 'prod_name', item.name);
     if (pixelType === 'addToCart') {
       params.price = item.price;
       params.quantity = item.quantity;
     }
   } else {
-    params.q = firstSet(data.query, ev.search_term);
+    params.q = pick('query', 'q', ev.search_term);
     if (pixelType === 'suggestClick') {
-      params.aq = data.typedQuery;
+      params.aq = pick('typedQuery', 'aq');
     }
-    params.catalogs = buildCatalogs(data.catalogs);
+    params.catalogs = buildCatalogs(pick('catalogs', 'catalogs'));
   }
 }
 
@@ -926,6 +960,19 @@ ___SERVER_PERMISSIONS___
           }
         }
       ]
+    },
+    "clientAnnotations": {
+      "isEditedByUser": true
+    },
+    "isRequired": true
+  },
+  {
+    "instance": {
+      "key": {
+        "publicId": "read_container_data",
+        "versionId": "1"
+      },
+      "param": []
     },
     "clientAnnotations": {
       "isEditedByUser": true
@@ -1145,6 +1192,7 @@ scenarios:
     mock('getCookieValues', function(name) { return []; });
     mock('generateRandom', function(min, max) { return min === 1 ? 42 : 1234567890123; });
     mock('getTimestampMillis', 1789300000000);
+    mock('getContainerVersion', {previewMode: false, debugMode: false});
     let cookie;
     mock('setCookie', function(name, value, options) { cookie = [name, value, options.domain]; });
     let sentUrl;
@@ -1164,6 +1212,93 @@ scenarios:
     assertThat(sentOptions.headers).isEqualTo({'user-agent': UA});
     assertThat(cookie).isEqualTo(['_br_uid_2', 'uid=1234567890123:v=ss-nnd-1.0:ts=1789300000000:hc=1', 'auto']);
     assertApi('gtmOnSuccess').wasCalled();
+- name: br event parameters fill empty fields and the automatic page type
+  code: |-
+    mock('getContainerVersion', {previewMode: false, debugMode: false});
+    mock('getAllEventData', {
+      page_location: 'https://shop.example/c/lamps',
+      user_agent: 'Mozilla/5.0 Chrome/136',
+      br_ptype: 'category',
+      br_cat_id: 'C12',
+      br_cat: 'Lamps'
+    });
+    mock('getCookieValues', function(name) { return []; });
+    let sentUrl;
+    mock('sendHttpGet', function(url, options) {
+      sentUrl = url;
+      return {then: function(ok, fail) { ok({statusCode: 200}); }};
+    });
+    runCode({pixelType: 'pageview', accountId: ' 6702 ', ptype: 'auto'});
+    assertThat(sentUrl.indexOf('?acct_id=6702&') !== -1).isTrue();
+    assertThat(sentUrl.indexOf('&ptype=category&cat_id=C12&cat=Lamps') !== -1).isTrue();
+- name: Automatic page type without br_ptype and unknown page types become other
+  code: |-
+    mock('getContainerVersion', {previewMode: false, debugMode: false});
+    mock('getAllEventData', {page_location: 'https://shop.example/', user_agent: 'Mozilla/5.0 Chrome/136'});
+    mock('getCookieValues', function(name) { return []; });
+    const urls = [];
+    mock('sendHttpGet', function(url, options) {
+      urls.push(url);
+      return {then: function(ok, fail) { ok({statusCode: 200}); }};
+    });
+    runCode({pixelType: 'pageview', accountId: '6702', ptype: 'auto'});
+    runCode({pixelType: 'pageview', accountId: '6702', ptype: 'pdp'});
+    assertThat(urls[0].indexOf('&ptype=other') !== -1).isTrue();
+    assertThat(urls[1].indexOf('&ptype=other') !== -1).isTrue();
+- name: Page type is trimmed and lowercased
+  code: |-
+    mock('getContainerVersion', {previewMode: false, debugMode: false});
+    mock('getAllEventData', {page_location: 'https://shop.example/p/1', user_agent: 'Mozilla/5.0 Chrome/136', br_ptype: 'Product ', br_prod_id: 'P7'});
+    mock('getCookieValues', function(name) { return []; });
+    let sentUrl;
+    mock('sendHttpGet', function(url, options) {
+      sentUrl = url;
+      return {then: function(ok, fail) { ok({statusCode: 200}); }};
+    });
+    runCode({pixelType: 'pageview', accountId: '6702', ptype: 'auto'});
+    assertThat(sentUrl.indexOf('&ptype=product&prod_id=P7') !== -1).isTrue();
+- name: br event parameters fill add to cart fields
+  code: |-
+    mock('getContainerVersion', {previewMode: false, debugMode: false});
+    mock('getAllEventData', {page_location: 'https://shop.example/', user_agent: 'Mozilla/5.0 Chrome/136', br_prod_id: 'P3', br_sku: 'S3', items: [{item_id: 'X', price: 5, quantity: 1}]});
+    mock('getCookieValues', function(name) { return []; });
+    let sentUrl;
+    mock('sendHttpGet', function(url, options) {
+      sentUrl = url;
+      return {then: function(ok, fail) { ok({statusCode: 200}); }};
+    });
+    runCode({pixelType: 'addToCart', accountId: '6702'});
+    assertThat(sentUrl.indexOf('&prod_id=P3&sku=S3') !== -1).isTrue();
+- name: GTM debug mode also sends debug events
+  code: |-
+    mock('getContainerVersion', {previewMode: false, debugMode: true});
+    mock('getAllEventData', {page_location: 'https://shop.example/', user_agent: 'Mozilla/5.0 Chrome/136'});
+    mock('getCookieValues', function(name) { return []; });
+    let sentUrl;
+    mock('sendHttpGet', function(url, options) {
+      sentUrl = url;
+      return {then: function(ok, fail) { ok({statusCode: 200}); }};
+    });
+    runCode({pixelType: 'pageview', accountId: '6702', ptype: 'homepage'});
+    assertThat(sentUrl.indexOf('&debug=true') !== -1).isTrue();
+- name: GTM Preview sends debug events automatically
+  code: |-
+    mock('getContainerVersion', {previewMode: true, debugMode: false});
+    mock('getAllEventData', {page_location: 'https://shop.example/', user_agent: 'Mozilla/5.0 Chrome/136'});
+    mock('getCookieValues', function(name) { return []; });
+    let sentUrl;
+    mock('sendHttpGet', function(url, options) {
+      sentUrl = url;
+      return {then: function(ok, fail) { ok({statusCode: 200}); }};
+    });
+    runCode({pixelType: 'pageview', accountId: '6702', ptype: 'homepage'});
+    assertThat(sentUrl.indexOf('&debug=true') !== -1).isTrue();
+- name: Non-numeric account ID fails without sending
+  code: |-
+    mock('getAllEventData', {page_location: 'https://shop.example/', user_agent: 'Mozilla/5.0 Chrome/136'});
+    runCode({pixelType: 'pageview', accountId: 'abc', ptype: 'homepage'});
+    assertApi('gtmOnFailure').wasCalled();
+    assertApi('sendHttpGet').wasNotCalled();
 - name: Existing visitor cookie is reused and the hit count goes up
   code: |-
     mock('getAllEventData', {page_location: 'https://shop.example/', user_agent: 'Mozilla/5.0 Chrome/136'});
